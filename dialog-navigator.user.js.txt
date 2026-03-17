@@ -1,23 +1,21 @@
 // ==UserScript==
-// @name         对话导航 (豆包+DeepSeek+千问+Kimi) 增强版
+// @name         AI对话导航增强版
 // @namespace    http://tampermonkey.net/
-// @version      2.2.1
+// @version      1.0.0
 // @description  支持豆包、DeepSeek、千问和 Kimi 的用户消息导航 + 对话目录，带搜索功能
-// @author       You
+// @author       Axero
 // @match        https://www.doubao.com/*
 // @match        https://www.doubao.com/chat/*
 // @match        https://chat.deepseek.com/*
 // @match        https://deepseek.com/*
-// @match        https://qianwen.aliyun.com/*
-// @match        https://tongyi.aliyun.com/*
 // @match        https://www.qianwen.com/chat*
+// @match        https://www.qianwen.com/*
 // @match        https://www.kimi.com/chat/*
 // @match        https://www.kimi.com/*
-// @icon         data:image/gif;base64,R0lGODlhAQABAAAAACH5BAEKAAEALAAAAAABAAEAAAICTAEAOw==
+// @icon         ...
 // @grant        none
 // @run-at       document-end
 // ==/UserScript==
-
 (function () {
     'use strict';
 
