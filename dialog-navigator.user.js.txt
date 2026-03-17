@@ -1,0 +1,985 @@
+// ==UserScript==
+// @name         AI对话导航增强版
+// @namespace    http://tampermonkey.net/
+// @version      1.0.0
+// @description  支持豆包、DeepSeek、千问和 Kimi 的用户消息导航 + 对话目录，带搜索功能
+// @author       Axero
+// @match        https://www.doubao.com/*
+// @match        https://www.doubao.com/chat/*
+// @match        https://chat.deepseek.com/*
+// @match        https://deepseek.com/*
+// @match        https://qianwen.aliyun.com/*
+// @match        https://tongyi.aliyun.com/*
+// @match        https://www.qianwen.com/chat*
+// @match        https://www.kimi.com/chat/*
+// @icon         data:image/gif;base64,R0lGODlhAQABAAAAACH5BAEKAAEALAAAAAABAAEAAAICTAEAOw==
+// @grant        none
+// @run-at       document-end
+// ==/UserScript==
+
+(function () {
+    'use strict';
+
+    // ==================== 网站配置 ====================
+    const SITE_CONFIG = {
+        doubao: {
+            name: '豆包',
+            userMessage: ['[class*="container-QQkdo4"]', '.container-QQkdo4'],
+            conversationItem: [
+                'a._546d736',
+                '._546d736',
+                '[data-testid="chat_list_thread_item"]',
+                '[class*="conversation-item"]',
+                '.chat-list-item'
+            ],
+            activeConversation: [
+                'a._546d736[aria-current="page"]',
+                '._546d736.active',
+                '[data-testid="chat_list_thread_item"][aria-current="page"]',
+                '[class*="active"]'
+            ],
+            contentContainer: [
+                '.main-content',
+                '#chat-container',
+                '[class*="main-content"]',
+                '[class*="chat-container"]'
+            ]
+        },
+        deepseek: {
+            name: 'DeepSeek',
+            userMessage: ['div.fbb737a4', '.fbb737a4'],
+            conversationItem: [
+                'a[href^="/a/chat/s/"]',
+                'a._546d736',
+                '[class*="conversation-item"]',
+                '[class*="chat-item"]',
+                '.chat-list-item',
+                '[data-testid="chat-item"]'
+            ],
+            activeConversation: [
+                '[class*="active"]',
+                '[aria-current="page"]'
+            ],
+            contentContainer: [
+                '.main-content',
+                '#chat-container',
+                '[class*="main-content"]',
+                '[class*="chat-container"]'
+            ]
+        },
+        qianwen: {
+            name: '千问',
+            userMessage: ['div.bubble-VIVxZ8', '[class*="bubble-"]'],
+            conversationItem: [
+                'div[class*="text-ellipsis"]',
+                'div[class*="whitespace-nowrap"]',
+                '[class*="conversation-item"]',
+                '[class*="chat-item"]',
+                '.chat-list-item'
+            ],
+            activeConversation: [
+                '[class*="active"]',
+                '[aria-current="page"]'
+            ],
+            contentContainer: [
+                'div.message-list-scroll-container',
+                '#qwen-message-list-area',
+                '.main-content',
+                '#chat-container',
+                '[class*="main-content"]',
+                '[class*="chat-container"]'
+            ]
+        },
+        kimi: {
+            name: 'Kimi',
+            userMessage: ['.user-content'],
+            conversationItem: [
+                '[class*="conversation-item"]',
+                '[class*="chat-item"]',
+                '.chat-list-item',
+                '[data-testid="chat-item"]',
+                '[role="listitem"]',
+                'a[href*="/chat/"]',
+                '.chat-name'
+            ],
+            activeConversation: [
+                '[class*="active"]',
+                '[aria-current="page"]'
+            ],
+            contentContainer: [
+                '.main-content',
+                '#chat-container',
+                '[class*="message-list"]',
+                '.chat-container'
+            ]
+        }
+    };
+
+    const CONFIG = {
+        settings: {
+            contentMaxWidth: { default: 900, min: 600, max: 2000, step: 50 },
+            storage: { key: 'dialog_nav_settings_v2' }
+        },
+        zIndex: 99999
+    };
+
+    // ==================== 检测当前网站 ====================
+    function detectSite() {
+        const hostname = window.location.hostname;
+        if (hostname.includes('doubao.com')) return 'doubao';
+        if (hostname.includes('deepseek.com')) return 'deepseek';
+        if (hostname.includes('qianwen.aliyun.com') || hostname.includes('tongyi.aliyun.com') || hostname.includes('www.qianwen.com')) return 'qianwen';
+        if (hostname.includes('kimi.com')) return 'kimi';
+        return null;
+    }
+
+    const currentSite = detectSite();
+    if (!currentSite) {
+        console.log('❌ 不支持的网站');
+        return;
+    }
+
+    const selectors = SITE_CONFIG[currentSite];
+    console.log('✅ 对话导航已启动 - 当前网站:', selectors.name);
+
+    const state = {
+        currentWidth: CONFIG.settings.contentMaxWidth.default,
+        observer: null,
+        observerPaused: false,
+        uiCreated: false,
+        targetContainer: null,
+        tocPanelOpen: false,
+        tocActiveTab: 'message',
+        messageItems: [],
+        conversationItems: [],
+        tocSearchTimer: null
+    };
+
+    function querySelector(selector) {
+        if (Array.isArray(selector)) {
+            for (const s of selector) {
+                const el = document.querySelector(s);
+                if (el) return el;
+            }
+            return null;
+        }
+        return document.querySelector(selector);
+    }
+
+    function querySelectorAll(selector) {
+        if (Array.isArray(selector)) {
+            for (const s of selector) {
+                const els = document.querySelectorAll(s);
+                if (els.length > 0) return els;
+            }
+            return [];
+        }
+        return document.querySelectorAll(selector);
+    }
+
+    // ==================== 日志输出 ====================
+    function log(...args) {
+        console.log('[对话导航]', ...args);
+    }
+
+    function error(...args) {
+        console.error('[对话导航]', ...args);
+    }
+
+    // ==================== 消息相关 ====================
+    function getMessageText(msgEl) {
+        if (!msgEl) return '';
+        const text = msgEl.textContent.trim().replace(/\s+/g, ' ');
+        return text.substring(0, 50);
+    }
+
+    function getUserMessages() {
+        const userMessages = querySelectorAll(selectors.userMessage);
+        return Array.from(userMessages).filter(msg => {
+            const rect = msg.getBoundingClientRect();
+            if (rect.width < 50 || rect.height < 20) return false;
+            const text = msg.textContent.trim();
+            if (text.length < 3) return false;
+            return true;
+        });
+    }
+
+    function getConversationTitle(convEl) {
+        if (!convEl) return '';
+        // 针对不同网站优化标题提取
+        let titleEl = null;
+        if (currentSite === 'kimi') {
+            titleEl = convEl.querySelector('.chat-name') || convEl; 
+            if (titleEl === convEl && convEl.classList.contains('chat-name')) titleEl = convEl;
+        } else if (currentSite === 'qianwen') {
+            titleEl = convEl.querySelector('div[class*="text-ellipsis"]');
+        } else if (currentSite === 'deepseek') {
+            titleEl = convEl.querySelector('div[class*="c08e6e"]');
+        }
+        if (!titleEl) {
+            titleEl = convEl.querySelector('[class*="title"], [class*="name"], .chat-name, .conversation-title');
+        }
+        const targetEl = titleEl || convEl;
+        let title = targetEl.textContent.trim().replace(/\s+/g, ' ');
+        if (title.length > 30) title = title.substring(0, 30) + '…';
+        return title || '未命名对话';
+    }
+
+    function getAllConversations() {
+        const convs = Array.from(querySelectorAll(selectors.conversationItem));
+        log(`获取到 ${convs.length} 个对话 (选择器: ${selectors.conversationItem.join(', ')})`);
+        return convs.filter(conv => {
+            const rect = conv.getBoundingClientRect();
+            if (rect.width < 10 || rect.height < 10) return false;
+            return true;
+        });
+    }
+
+    function getActiveConversation() {
+        const conversations = Array.from(querySelectorAll(selectors.conversationItem));
+        const currentPath = window.location.pathname;
+        
+        for (const conv of conversations) {
+            if (conv.tagName === 'A' && conv.href) {
+                const hrefPath = new URL(conv.href).pathname;
+                if (hrefPath === currentPath) {
+                    return conv;
+                }
+            }
+        }
+        
+        for (const conv of conversations) {
+            if (conv.classList.contains('active') || conv.getAttribute('aria-current') === 'page') {
+                return conv;
+            }
+        }
+        
+        return null;
+    }
+
+    function simulateClick(el) {
+        if (!el) return;
+        log('模拟点击元素:', el);
+        el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+        
+        if (el.tagName === 'A') {
+            el.click();
+            return;
+        }
+        
+        const rect = el.getBoundingClientRect();
+        const clientX = rect.left + rect.width / 2;
+        const clientY = rect.top + rect.height / 2;
+        ['mouseover', 'mousedown', 'mouseup', 'click'].forEach(type => {
+            el.dispatchEvent(new MouseEvent(type, { bubbles: true, clientX, clientY }));
+        });
+    }
+
+    function jumpToConversation(item) {
+        if (!item) return;
+        log('跳转到对话:', item);
+        
+        if (currentSite === 'kimi' && item.classList && item.classList.contains('chat-name')) {
+            let parent = item.parentElement;
+            while (parent) {
+                if (parent.tagName === 'A' || parent.getAttribute('role') === 'button' || /item/i.test(parent.className)) {
+                    item = parent;
+                    break;
+                }
+                parent = parent.parentElement;
+            }
+        }
+        
+        if (item.tagName === 'A' && item.href) {
+            if (item.href === window.location.href) {
+                item.scrollIntoView({ behavior: 'smooth', block: 'center' });
+            } else {
+                window.location.href = item.href;
+            }
+            return;
+        }
+        
+        setTimeout(() => simulateClick(item), 300);
+    }
+
+    // ==================== 消息导航 ====================
+    function getCurrentVisibleUserMessage() {
+        const userMessages = getUserMessages();
+        if (!userMessages.length) return null;
+        const viewportCenter = window.innerHeight / 2;
+        let closestMsg = null;
+        let minDistance = Infinity;
+        userMessages.forEach(msg => {
+            const rect = msg.getBoundingClientRect();
+            if (rect.bottom < 0 || rect.top > window.innerHeight) return;
+            const distance = Math.abs((rect.top + rect.height/2) - viewportCenter);
+            if (distance < minDistance) {
+                minDistance = distance;
+                closestMsg = msg;
+            }
+        });
+        return closestMsg;
+    }
+
+    function jumpToPreviousUserMessage() {
+        log('执行: 上一条用户消息');
+        const userMessages = getUserMessages();
+        if (!userMessages.length) {
+            alert('未找到用户消息，请确保当前对话有历史记录');
+            return;
+        }
+        const current = getCurrentVisibleUserMessage();
+        if (!current) {
+            userMessages[0].scrollIntoView({ behavior: 'smooth', block: 'center' });
+            highlightMessage(userMessages[0]);
+            return;
+        }
+        const index = userMessages.indexOf(current);
+        if (index > 0) {
+            userMessages[index - 1].scrollIntoView({ behavior: 'smooth', block: 'center' });
+            highlightMessage(userMessages[index - 1]);
+        } else {
+            userMessages[userMessages.length - 1].scrollIntoView({ behavior: 'smooth', block: 'center' });
+            highlightMessage(userMessages[userMessages.length - 1]);
+        }
+    }
+
+    function jumpToNextUserMessage() {
+        log('执行: 下一条用户消息');
+        const userMessages = getUserMessages();
+        if (!userMessages.length) {
+            alert('未找到用户消息，请确保当前对话有历史记录');
+            return;
+        }
+        const current = getCurrentVisibleUserMessage();
+        if (!current) {
+            userMessages[0].scrollIntoView({ behavior: 'smooth', block: 'center' });
+            highlightMessage(userMessages[0]);
+            return;
+        }
+        const index = userMessages.indexOf(current);
+        if (index < userMessages.length - 1) {
+            userMessages[index + 1].scrollIntoView({ behavior: 'smooth', block: 'center' });
+            highlightMessage(userMessages[index + 1]);
+        } else {
+            userMessages[0].scrollIntoView({ behavior: 'smooth', block: 'center' });
+            highlightMessage(userMessages[0]);
+        }
+    }
+
+    function highlightMessage(msgEl) {
+        if (!msgEl) return;
+        msgEl.style.transition = 'background-color 0.3s';
+        const originalBg = msgEl.style.backgroundColor;
+        msgEl.style.backgroundColor = 'rgba(250, 173, 20, 0.2)';
+        setTimeout(() => { msgEl.style.backgroundColor = originalBg; }, 1000);
+    }
+
+    // ==================== 目录面板 ====================
+    function refreshMessageItems() {
+        const userMessages = getUserMessages();
+        state.messageItems = userMessages.map((msg, index) => ({
+            element: msg,
+            text: getMessageText(msg),
+            index: index + 1
+        }));
+        log(`刷新消息列表: ${state.messageItems.length} 条`);
+        return state.messageItems;
+    }
+
+    function refreshConversationItems() {
+        const conversations = getAllConversations();
+        state.conversationItems = conversations.map((conv, index) => ({
+            element: conv,
+            text: getConversationTitle(conv),
+            index: index + 1
+        }));
+        log(`刷新对话列表: ${state.conversationItems.length} 项`);
+        return state.conversationItems;
+    }
+
+    function filterItems(items, keyword) {
+        if (!keyword || keyword.trim() === '') return items;
+        const lowerKeyword = keyword.toLowerCase().trim();
+        return items.filter(item => item.text.toLowerCase().includes(lowerKeyword));
+    }
+
+    function escapeHtml(text) {
+        const div = document.createElement('div');
+        div.textContent = text;
+        return div.innerHTML;
+    }
+
+    function renderMessageItems(container, filteredItems) {
+        if (filteredItems.length === 0) {
+            container.innerHTML = `
+                <div style="padding: 20px; color: #999; text-align: center;">
+                    <div style="font-size: 40px; margin-bottom: 10px;">🔍</div>
+                    <div>未找到匹配的消息</div>
+                </div>
+            `;
+            return;
+        }
+        container.innerHTML = '';
+        filteredItems.forEach(item => {
+            const div = document.createElement('div');
+            div.style.cssText = `
+                padding: 10px 15px;
+                border-bottom: 1px solid rgba(0,0,0,0.08);
+                cursor: pointer;
+                font-size: 13px;
+                line-height: 1.4;
+                transition: background-color 0.2s;
+                color: #333;
+            `;
+            div.innerHTML = `<strong style="color: #1890ff;">#${item.index}</strong> ${escapeHtml(item.text)}...`;
+            div.addEventListener('mouseenter', () => div.style.backgroundColor = 'rgba(24, 144, 255, 0.08)');
+            div.addEventListener('mouseleave', () => div.style.backgroundColor = 'transparent');
+            div.addEventListener('click', () => {
+                log('点击消息项跳转:', item.text);
+                item.element.scrollIntoView({ behavior: 'smooth', block: 'center' });
+                highlightMessage(item.element);
+            });
+            container.appendChild(div);
+        });
+    }
+
+    function renderConversationItems(container, filteredItems) {
+        if (filteredItems.length === 0) {
+            container.innerHTML = `
+                <div style="padding: 20px; color: #999; text-align: center;">
+                    <div style="font-size: 40px; margin-bottom: 10px;">💬</div>
+                    <div>未找到匹配的对话</div>
+                </div>
+            `;
+            return;
+        }
+        container.innerHTML = '';
+        filteredItems.forEach(item => {
+            const div = document.createElement('div');
+            div.style.cssText = `
+                padding: 10px 15px;
+                border-bottom: 1px solid rgba(0,0,0,0.08);
+                cursor: pointer;
+                font-size: 13px;
+                line-height: 1.4;
+                transition: background-color 0.2s;
+                color: #333;
+            `;
+            div.innerHTML = `<strong style="color: #52c41a;">💬</strong> ${escapeHtml(item.text)}`;
+            div.addEventListener('mouseenter', () => div.style.backgroundColor = 'rgba(82, 196, 26, 0.08)');
+            div.addEventListener('mouseleave', () => div.style.backgroundColor = 'transparent');
+            div.addEventListener('click', () => {
+                log('点击对话项跳转:', item.text);
+                jumpToConversation(item.element);
+                state.tocPanelOpen = false;
+                const panel = document.getElementById('dialog-toc-panel');
+                if (panel) panel.style.right = '-320px';
+            });
+            container.appendChild(div);
+        });
+    }
+
+    function updateTocCount() {
+        const countEl = document.getElementById('dialog-toc-count');
+        if (!countEl) return;
+        if (state.tocActiveTab === 'message') {
+            countEl.textContent = state.messageItems.length;
+        } else {
+            countEl.textContent = state.conversationItems.length;
+        }
+    }
+
+    function onTocSearchInput() {
+        const searchInput = document.getElementById('dialog-toc-search');
+        if (!searchInput) return;
+        
+        const keyword = searchInput.value;
+        log(`搜索输入: "${keyword}" 当前标签: ${state.tocActiveTab}`);
+        
+        const contentEl = document.getElementById('dialog-toc-content');
+        if (!contentEl) return;
+        
+        pauseObserver();
+        
+        let filteredItems;
+        if (state.tocActiveTab === 'message') {
+            filteredItems = filterItems(state.messageItems, keyword);
+            renderMessageItems(contentEl, filteredItems);
+        } else {
+            filteredItems = filterItems(state.conversationItems, keyword);
+            renderConversationItems(contentEl, filteredItems);
+        }
+        
+        resumeObserver();
+    }
+
+    function switchTab(tab) {
+        if (tab === state.tocActiveTab) return;
+        log(`切换标签: ${tab}`);
+        state.tocActiveTab = tab;
+        
+        const messageTab = document.getElementById('dialog-tab-message');
+        const convTab = document.getElementById('dialog-tab-conversation');
+        if (messageTab && convTab) {
+            if (tab === 'message') {
+                messageTab.style.background = '#1890ff';
+                messageTab.style.color = 'white';
+                convTab.style.background = 'transparent';
+                convTab.style.color = '#666';
+            } else {
+                convTab.style.background = '#52c41a';
+                convTab.style.color = 'white';
+                messageTab.style.background = 'transparent';
+                messageTab.style.color = '#666';
+            }
+        }
+        
+        if (tab === 'message') {
+            refreshMessageItems();
+        } else {
+            refreshConversationItems();
+        }
+        updateTocCount();
+        
+        const searchInput = document.getElementById('dialog-toc-search');
+        if (searchInput) searchInput.value = '';
+        
+        const contentEl = document.getElementById('dialog-toc-content');
+        if (contentEl) {
+            pauseObserver();
+            if (tab === 'message') {
+                renderMessageItems(contentEl, state.messageItems);
+            } else {
+                renderConversationItems(contentEl, state.conversationItems);
+            }
+            resumeObserver();
+        }
+    }
+
+    function createTocPanel() {
+        if (document.getElementById('dialog-toc-panel')) return;
+        log('创建目录面板');
+        
+        const panel = document.createElement('div');
+        panel.id = 'dialog-toc-panel';
+        panel.style.cssText = `
+            position: fixed;
+            top: 0;
+            right: -320px;
+            width: 320px;
+            height: 100vh;
+            background: rgba(255, 255, 255, 0.98);
+            box-shadow: -2px 0 12px rgba(0,0,0,0.15);
+            z-index: ${CONFIG.zIndex - 1};
+            transition: right 0.3s ease;
+            display: flex;
+            flex-direction: column;
+            border-left: 1px solid rgba(0,0,0,0.08);
+        `;
+        
+        const header = document.createElement('div');
+        header.style.cssText = `
+            padding: 15px;
+            background: linear-gradient(135deg, #1890ff 0%, #096dd9 100%);
+            color: white;
+            font-weight: bold;
+            font-size: 15px;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        `;
+        header.innerHTML = `
+            <span>📑 ${selectors.name} 导航</span>
+            <span style="cursor: pointer; font-size: 18px;" id="dialog-toc-close">✕</span>
+        `;
+        panel.appendChild(header);
+        
+        const tabBar = document.createElement('div');
+        tabBar.style.cssText = `
+            display: flex;
+            border-bottom: 1px solid rgba(0,0,0,0.08);
+            background: #fafafa;
+        `;
+        
+        const messageTab = document.createElement('div');
+        messageTab.id = 'dialog-tab-message';
+        messageTab.textContent = '📝 消息目录';
+        messageTab.style.cssText = `
+            flex: 1;
+            text-align: center;
+            padding: 10px 0;
+            cursor: pointer;
+            font-size: 13px;
+            font-weight: 500;
+            transition: all 0.2s;
+            background: #1890ff;
+            color: white;
+        `;
+        messageTab.addEventListener('click', () => switchTab('message'));
+        
+        const convTab = document.createElement('div');
+        convTab.id = 'dialog-tab-conversation';
+        convTab.textContent = '💬 对话目录';
+        convTab.style.cssText = `
+            flex: 1;
+            text-align: center;
+            padding: 10px 0;
+            cursor: pointer;
+            font-size: 13px;
+            font-weight: 500;
+            transition: all 0.2s;
+            background: transparent;
+            color: #666;
+        `;
+        convTab.addEventListener('click', () => switchTab('conversation'));
+        
+        tabBar.appendChild(messageTab);
+        tabBar.appendChild(convTab);
+        panel.appendChild(tabBar);
+        
+        const searchContainer = document.createElement('div');
+        searchContainer.style.cssText = `
+            padding: 10px 15px;
+            background: rgba(0,0,0,0.03);
+            border-bottom: 1px solid rgba(0,0,0,0.08);
+        `;
+        
+        const searchInput = document.createElement('input');
+        searchInput.id = 'dialog-toc-search';
+        searchInput.type = 'text';
+        searchInput.placeholder = '🔍 搜索...';
+        searchInput.style.cssText = `
+            width: 100%;
+            padding: 8px 12px;
+            border: 1px solid rgba(0,0,0,0.15);
+            border-radius: 4px;
+            font-size: 13px;
+            outline: none;
+            box-sizing: border-box;
+        `;
+        searchInput.addEventListener('input', () => {
+            if (state.tocSearchTimer) clearTimeout(state.tocSearchTimer);
+            state.tocSearchTimer = setTimeout(onTocSearchInput, 300);
+        });
+        searchInput.addEventListener('click', (e) => e.stopPropagation());
+        
+        searchContainer.appendChild(searchInput);
+        panel.appendChild(searchContainer);
+        
+        const content = document.createElement('div');
+        content.id = 'dialog-toc-content';
+        content.style.cssText = `flex: 1; overflow-y: auto; background: white;`;
+        panel.appendChild(content);
+        
+        const footer = document.createElement('div');
+        footer.style.cssText = `
+            padding: 10px 15px;
+            background: rgba(0,0,0,0.03);
+            font-size: 12px;
+            color: #666;
+            border-top: 1px solid rgba(0,0,0,0.08);
+        `;
+        footer.innerHTML = '<span id="dialog-toc-count">0</span> 条项目';
+        panel.appendChild(footer);
+        
+        document.body.appendChild(panel);
+        
+        const closeBtn = document.getElementById('dialog-toc-close');
+        if (closeBtn) {
+            closeBtn.addEventListener('click', () => {
+                log('关闭目录面板');
+                state.tocPanelOpen = false;
+                panel.style.right = '-320px';
+            });
+        }
+        
+        refreshMessageItems();
+        refreshConversationItems();
+        renderMessageItems(content, state.messageItems);
+        updateTocCount();
+    }
+
+    function toggleTocPanel() {
+        state.tocPanelOpen = !state.tocPanelOpen;
+        log(`切换目录面板: ${state.tocPanelOpen ? '打开' : '关闭'}`);
+        const panel = document.getElementById('dialog-toc-panel');
+        if (!panel) return;
+        if (state.tocPanelOpen) {
+            panel.style.right = '0';
+            pauseObserver();
+            if (state.tocActiveTab === 'message') {
+                refreshMessageItems();
+                renderMessageItems(document.getElementById('dialog-toc-content'), state.messageItems);
+            } else {
+                refreshConversationItems();
+                renderConversationItems(document.getElementById('dialog-toc-content'), state.conversationItems);
+            }
+            updateTocCount();
+            resumeObserver();
+        } else {
+            panel.style.right = '-320px';
+        }
+    }
+
+    // ==================== 宽度调整 ====================
+    function findTargetContainer() {
+        if (state.targetContainer && document.contains(state.targetContainer)) {
+            return state.targetContainer;
+        }
+        const containers = querySelectorAll(selectors.contentContainer);
+        if (containers.length > 0) {
+            let largest = containers[0];
+            let maxArea = 0;
+            containers.forEach(el => {
+                const rect = el.getBoundingClientRect();
+                const area = rect.width * rect.height;
+                if (area > maxArea) { maxArea = area; largest = el; }
+            });
+            state.targetContainer = largest;
+            return largest;
+        }
+        return null;
+    }
+
+    function setContentMaxWidth(width) {
+        const min = CONFIG.settings.contentMaxWidth.min;
+        const max = CONFIG.settings.contentMaxWidth.max;
+        width = Math.max(min, Math.min(max, width));
+        state.currentWidth = width;
+        log(`设置内容最大宽度: ${width}px`);
+        
+        try {
+            localStorage.setItem(CONFIG.settings.storage.key, JSON.stringify({
+                contentMaxWidth: state.currentWidth,
+                lastUpdated: Date.now()
+            }));
+        } catch (e) {}
+        
+        let styleSheet = document.getElementById('dialog-width-style');
+        if (!styleSheet) {
+            styleSheet = document.createElement('style');
+            styleSheet.id = 'dialog-width-style';
+            document.head.appendChild(styleSheet);
+        }
+        
+        styleSheet.textContent = `
+            [class*="message-list"], [class*="chat-content"], [class*="main-content"],
+            .main-content, #chat-container, .chat-container {
+                max-width: ${width}px !important;
+                width: 100% !important;
+                margin-left: auto !important;
+                margin-right: auto !important;
+            }
+            .max-w-3xl, .max-w-4xl, .max-w-5xl, .max-w-6xl {
+                max-width: ${width}px !important;
+            }
+        `;
+        
+        const container = findTargetContainer();
+        if (container) {
+            container.style.maxWidth = width + 'px';
+            container.style.width = '100%';
+        }
+    }
+
+    function increaseContentWidth() { 
+        log('增加宽度');
+        setContentMaxWidth(state.currentWidth + CONFIG.settings.contentMaxWidth.step); 
+    }
+    function decreaseContentWidth() { 
+        log('减小宽度');
+        setContentMaxWidth(state.currentWidth - CONFIG.settings.contentMaxWidth.step); 
+    }
+    function resetContentWidth() { 
+        log('重置宽度');
+        setContentMaxWidth(CONFIG.settings.contentMaxWidth.default); 
+    }
+
+    // ==================== 创建侧边栏按钮（悬浮展开）====================
+    function createButton(symbol, text, onClick, bgColor, hoverColor) {
+        const btn = document.createElement('button');
+        btn.innerHTML = `<span style="display:inline-block; width:20px; text-align:center;">${symbol}</span><span class="btn-text" style="margin-left:5px; display:none;">${text}</span>`;
+        btn.title = text;
+        btn.onclick = (e) => { e.stopPropagation(); onClick(); };
+        btn.style.cssText = `
+            padding: 10px 5px;
+            background-color: ${bgColor};
+            color: white;
+            border: none;
+            border-radius: 4px 0 0 4px;
+            cursor: pointer;
+            font-size: 16px;
+            width: 100%;
+            text-align: left;
+            white-space: nowrap;
+            transition: background-color 0.2s;
+            margin: 2px 0;
+            box-sizing: border-box;
+        `;
+        btn.addEventListener('mouseenter', () => btn.style.backgroundColor = hoverColor);
+        btn.addEventListener('mouseleave', () => btn.style.backgroundColor = bgColor);
+        return btn;
+    }
+
+    function createSeparator() {
+        const sep = document.createElement('div');
+        sep.style.cssText = `height: 1px; background: rgba(0,0,0,0.15); margin: 6px 8px;`;
+        return sep;
+    }
+
+    function createNavigationUI() {
+        if (document.getElementById('dialog-nav-container')) return;
+        log('创建侧边栏UI');
+        
+        const container = document.createElement('div');
+        container.id = 'dialog-nav-container';
+        container.className = 'nav-container';
+        container.style.cssText = `
+            position: fixed;
+            top: 50%;
+            right: 0;
+            transform: translateY(-50%);
+            z-index: ${CONFIG.zIndex};
+            display: flex;
+            flex-direction: column;
+            background: rgba(255, 255, 255, 0.98);
+            border-radius: 8px 0 0 8px;
+            box-shadow: -2px 2px 12px rgba(0,0,0,0.15);
+            width: 45px;
+            transition: width 0.3s;
+            padding: 8px 0;
+            border: 1px solid rgba(0,0,0,0.08);
+            overflow: hidden;
+        `;
+        
+        container.addEventListener('mouseenter', () => {
+            container.style.width = '150px';
+            container.querySelectorAll('.btn-text').forEach(span => span.style.display = 'inline');
+        });
+        container.addEventListener('mouseleave', () => {
+            container.style.width = '45px';
+            container.querySelectorAll('.btn-text').forEach(span => span.style.display = 'none');
+        });
+        
+        container.appendChild(createButton('↑', '上一条消息', jumpToPreviousUserMessage, '#52c41a', '#73d13d'));
+        container.appendChild(createButton('↓', '下一条消息', jumpToNextUserMessage, '#52c41a', '#73d13d'));
+        container.appendChild(createSeparator());
+        container.appendChild(createButton('📑', '目录', toggleTocPanel, '#722ed1', '#9254de'));
+        container.appendChild(createSeparator());
+        container.appendChild(createButton('➕', '加宽', increaseContentWidth, '#faad14', '#ffc53d'));
+        container.appendChild(createButton('➖', '缩窄', decreaseContentWidth, '#faad14', '#ffc53d'));
+        container.appendChild(createButton('↻', '重置', resetContentWidth, '#8c8c8c', '#bfbfbf'));
+        
+        document.body.appendChild(container);
+        state.uiCreated = true;
+    }
+
+    // ==================== 键盘监听 ====================
+    function initKeyboardListener() {
+        document.addEventListener('keydown', (e) => {
+            const activeEl = document.activeElement;
+            if (activeEl.tagName === 'INPUT' || activeEl.tagName === 'TEXTAREA' || activeEl.isContentEditable) return;
+            
+            if (e.altKey) {
+                switch(e.key) {
+                    case 'PageUp': e.preventDefault(); jumpToPreviousUserMessage(); break;
+                    case 'PageDown': e.preventDefault(); jumpToNextUserMessage(); break;
+                    case 'd': case 'D': e.preventDefault(); toggleTocPanel(); break;
+                    case 'Home': e.preventDefault(); decreaseContentWidth(); break;
+                    case 'End': e.preventDefault(); increaseContentWidth(); break;
+                    case 'r': case 'R': e.preventDefault(); resetContentWidth(); break;
+                }
+            }
+        });
+        log('键盘监听已初始化');
+    }
+
+    // ==================== 观察器 ====================
+    function pauseObserver() {
+        if (state.observer && !state.observerPaused) {
+            state.observer.disconnect();
+            state.observerPaused = true;
+            log('观察器暂停');
+        }
+    }
+
+    function resumeObserver() {
+        if (state.observer && state.observerPaused) {
+            state.observer.observe(document.body, { childList: true, subtree: true });
+            state.observerPaused = false;
+            log('观察器恢复');
+        }
+    }
+
+    // ==================== 初始化 ====================
+    function loadSettings() {
+        try {
+            const saved = localStorage.getItem(CONFIG.settings.storage.key);
+            if (saved) {
+                const parsed = JSON.parse(saved);
+                state.currentWidth = parsed.contentMaxWidth || CONFIG.settings.contentMaxWidth.default;
+                log('加载设置:', parsed);
+                return parsed;
+            }
+        } catch (e) {}
+        return null;
+    }
+
+    function init() {
+        log('初始化脚本');
+        loadSettings();
+        initKeyboardListener();
+        createNavigationUI();
+        createTocPanel();
+        
+        setTimeout(() => {
+            setContentMaxWidth(state.currentWidth);
+            refreshMessageItems();
+            refreshConversationItems();
+        }, 1000);
+        
+        state.observer = new MutationObserver(() => {
+            if (!document.getElementById('dialog-nav-container')) createNavigationUI();
+            
+            if (state.tocPanelOpen && !state.observerPaused) {
+                if (state.tocRefreshTimer) clearTimeout(state.tocRefreshTimer);
+                state.tocRefreshTimer = setTimeout(() => {
+                    pauseObserver();
+                    if (state.tocActiveTab === 'message') {
+                        refreshMessageItems();
+                    } else {
+                        refreshConversationItems();
+                    }
+                    updateTocCount();
+                    const searchInput = document.getElementById('dialog-toc-search');
+                    if (searchInput && !searchInput.value) {
+                        const contentEl = document.getElementById('dialog-toc-content');
+                        if (contentEl) {
+                            if (state.tocActiveTab === 'message') {
+                                renderMessageItems(contentEl, state.messageItems);
+                            } else {
+                                renderConversationItems(contentEl, state.conversationItems);
+                            }
+                        }
+                    }
+                    resumeObserver();
+                }, 500);
+            }
+        });
+        state.observer.observe(document.body, { childList: true, subtree: true });
+        log('初始化完成');
+    }
+
+    window.addEventListener('beforeunload', () => {
+        if (state.observer) state.observer.disconnect();
+        log('脚本卸载');
+    });
+
+    if (document.readyState === 'loading') {
+        document.addEventListener('DOMContentLoaded', init);
+    } else {
+        window.addEventListener('load', init);
+    }
+
+})();
