@@ -55,7 +55,7 @@
    在浏览器中安装 [Tampermonkey](https://www.tampermonkey.net/) 或 [Violentmonkey](https://violentmonkey.github.io/) 扩展。
 
 2. **获取脚本代码**  
-   访问 [GitHub 仓库](你的GitHub仓库链接)，打开 `dialog-navigator.user.js.txt` 文件，**复制文件中的所有代码**。
+   访问 [GitHub 仓库](你的GitHub仓库链接)，打开 `dialog-navigator.user.js` 文件，**复制文件中的所有代码**。
 
 3. **创建新脚本**  
    - 点击浏览器右上角的油猴图标，选择 **“添加新脚本”**（或 **“创建新脚本”**）。
