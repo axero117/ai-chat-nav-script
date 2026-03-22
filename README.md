@@ -25,7 +25,9 @@
 侧边栏默认只显示图标，**鼠标悬浮时展开显示完整文字**，节省屏幕空间，需要时一目了然。侧边栏底部新增 **❓** 按钮，点击可查看所有快捷键说明。
 
 ### 多平台支持
-目前已适配四个主流 AI 对话网站：
+目前已适配六个主流 AI 对话网站：
+- [ChatGPT](https://chatgpt.com/)
+- [Gemini](https://gemini.google.com/)
 - [豆包](https://www.doubao.com/chat/)
 - [DeepSeek](https://chat.deepseek.com/)
 - [千问](https://www.qianwen.com/chat)
@@ -71,6 +73,8 @@
 
 | 网站名称 | 域名匹配 |
 |----------|----------|
+| ChatGPT  | `https://chatgpt.com/*` |
+| Gemini   | `https://gemini.google.com/*` |
 | 豆包     | `https://www.doubao.com/chat/*` |
 | DeepSeek | `https://chat.deepseek.com/*` |
 | 千问     | `https://www.qianwen.com/chat*` |
